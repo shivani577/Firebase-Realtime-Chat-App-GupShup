@@ -1,0 +1,287 @@
+// ===== Filename: app/src/main/java/com/example/smartaichat/MainActivity.java =====
+package com.example.smartaichat;
+
+import android.content.Intent;
+import android.net.Uri;
+import android.os.Bundle;
+import android.view.View;
+import android.widget.EditText;
+import android.widget.ImageButton;
+import androidx.annotation.Nullable;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+import com.google.firebase.auth.FirebaseAuth;
+import com.google.firebase.database.*;
+import com.google.firebase.storage.FirebaseStorage;
+import com.google.firebase.storage.StorageReference;
+import com.vanniktech.emoji.EmojiPopup;
+import java.util.*;
+
+public class MainActivity extends AppCompatActivity {
+    private static final int PICK_MEDIA = 1001;
+    private String currentUserId;
+    private DatabaseReference messagesRef;
+    private RecyclerView rvMessages;
+    private MessageAdapter adapter;
+    private EditText etMessage;
+    private EmojiPopup emojiPopup;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        // Firebase Auth
+        currentUserId = FirebaseAuth.getInstance().getCurrentUser().getUid();
+        messagesRef = FirebaseDatabase.getInstance().getReference("chatRooms")
+                .child("globalRoom") // for simplicity one room
+                .child("messages");
+
+        // RecyclerView
+        rvMessages = findViewById(R.id.rvMessages);
+        rvMessages.setLayoutManager(new LinearLayoutManager(this));
+        adapter = new MessageAdapter(currentUserId);
+        rvMessages.setAdapter(adapter);
+
+        // Load messages
+        messagesRef.addValueEventListener(new ValueEventListener() {
+            @Override public void onDataChange(DataSnapshot snap) {
+                List<Message> list = new ArrayList<>();
+                for (DataSnapshot ds : snap.getChildren()) {
+                    list.add(ds.getValue(Message.class));
+                }
+                adapter.submitList(list);
+                rvMessages.scrollToPosition(list.size()-1);
+            }
+            @Override public void onCancelled(DatabaseError e) {}
+        });
+
+        // Input & Emoji
+        etMessage = findViewById(R.id.etMessage);
+        View rootView = findViewById(R.id.rootLayout);
+        emojiPopup = EmojiPopup.Builder.fromRootView(rootView).build(etMessage);
+        findViewById(R.id.btnEmoji).setOnClickListener(v -> emojiPopup.toggle());
+
+        // Send text
+        findViewById(R.id.btnSend).setOnClickListener(v -> {
+            String txt = etMessage.getText().toString().trim();
+            if (txt.isEmpty()) return;
+            Message msg = new Message(currentUserId, txt, System.currentTimeMillis(), null, "text");
+            messagesRef.push().setValue(msg);
+            etMessage.setText("");
+        });
+
+        // Attach media
+        findViewById(R.id.btnAttach).setOnClickListener(v -> {
+            Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+            i.setType("image/* video/*");
+            startActivityForResult(i, PICK_MEDIA);
+        });
+    }
+
+    @Override protected void onActivityResult(int req, int res, @Nullable Intent data) {
+        super.onActivityResult(req, res, data);
+        if (req == PICK_MEDIA && res == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            StorageReference storRef = FirebaseStorage.getInstance()
+                    .getReference("chatMedia")
+                    .child(UUID.randomUUID().toString());
+            storRef.putFile(uri).continueWithTask(task -> storRef.getDownloadUrl())
+                .addOnSuccessListener(url -> {
+                    String type = getContentResolver().getType(uri).startsWith("image") ? "image" : "video";
+                    Message msg = new Message(currentUserId, null, System.currentTimeMillis(), url.toString(), type);
+                    messagesRef.push().setValue(msg);
+                });
+        }
+    }
+}
+
+// ===== Filename: app/src/main/java/com/example/smartaichat/Message.java =====
+package com.example.smartaichat;
+public class Message {
+    public String senderId, text, mediaUrl, type;
+    public long timestamp;
+    public Message() {}
+    public Message(String senderId, String text, long timestamp, String mediaUrl, String type) {
+        this.senderId = senderId; this.text = text;
+        this.timestamp = timestamp; this.mediaUrl = mediaUrl; this.type = type;
+    }
+}
+
+// ===== Filename: app/src/main/java/com/example/smartaichat/MessageAdapter.java =====
+package com.example.smartaichat;
+import android.view.LayoutInflater;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.ImageView;
+import android.widget.TextView;
+import androidx.recyclerview.widget.*;
+import com.bumptech.glide.Glide;
+import java.text.SimpleDateFormat;
+import java.util.*;
+
+public class MessageAdapter extends ListAdapter<Message, RecyclerView.ViewHolder> {
+    private String me;
+    private static final int TYPE_ME = 1, TYPE_OTHER = 2;
+    public MessageAdapter(String myId) { super(DIFF); me = myId; }
+    @Override public int getItemViewType(int pos) {
+        return getItem(pos).senderId.equals(me) ? TYPE_ME : TYPE_OTHER;
+    }
+    @Override public RecyclerView.ViewHolder onCreateViewHolder(ViewGroup p, int vt) {
+        int lay = vt==TYPE_ME? R.layout.item_me : R.layout.item_other;
+        return new VH(LayoutInflater.from(p.getContext()).inflate(lay,p,false));
+    }
+    @Override public void onBindViewHolder(RecyclerView.ViewHolder h, int pos) {
+        VH vh = (VH)h; Message m = getItem(pos);
+        if ("text".equals(m.type)) {
+            vh.tvText.setText(m.text); vh.ivMedia.setVisibility(View.GONE);
+        } else {
+            vh.tvText.setVisibility(View.GONE);
+            vh.ivMedia.setVisibility(View.VISIBLE);
+            Glide.with(vh.ivMedia).load(m.mediaUrl).into(vh.ivMedia);
+        }
+        vh.tvTime.setText(new SimpleDateFormat("hh:mm a", Locale.getDefault()).format(new Date(m.timestamp)));
+    }
+    static class VH extends RecyclerView.ViewHolder {
+        TextView tvText, tvTime; ImageView ivMedia;
+        VH(View v) { super(v);
+            tvText = v.findViewById(R.id.tvText);
+            tvTime = v.findViewById(R.id.tvTime);
+            ivMedia = v.findViewById(R.id.ivMedia);
+        }
+    }
+    private static final DiffUtil.ItemCallback<Message> DIFF =
+        new DiffUtil.ItemCallback<Message>() {
+      @Override public boolean areItemsTheSame(Message a, Message b) {
+          return a.timestamp==b.timestamp;
+      }
+      @Override public boolean areContentsTheSame(Message a, Message b) {
+          return a.equals(b);
+      }
+    };
+}
+
+// ===== Filename: app/src/main/res/layout/activity_main.xml =====
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootLayout"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_study_pattern">
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/rvMessages"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="8dp"/>
+
+    <LinearLayout
+        android:layout_gravity="bottom"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="#FFFFFF">
+
+        <ImageButton
+            android:id="@+id/btnEmoji"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:src="@drawable/ic_emoji"/>
+
+        <EditText
+            android:id="@+id/etMessage"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:hint="Type a message"/>
+
+        <ImageButton
+            android:id="@+id/btnAttach"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:src="@drawable/ic_attach"/>
+
+        <ImageButton
+            android:id="@+id/btnSend"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:src="@drawable/ic_send"/>
+    </LinearLayout>
+</FrameLayout>
+
+// ===== Filename: app/src/main/res/layout/item_me.xml =====
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:gravity="end" android:orientation="vertical"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:padding="4dp">
+    <TextView android:id="@+id/tvText" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:background="@drawable/bg_bubble_me"
+        android:padding="8dp"/>
+    <ImageView android:id="@+id/ivMedia" android:layout_width="200dp"
+        android:layout_height="200dp" android:visibility="gone"/>
+    <TextView android:id="@+id/tvTime" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:textSize="10sp"/>
+</LinearLayout>
+
+// ===== Filename: app/src/main/res/layout/item_other.xml =====
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:gravity="start" android:orientation="vertical"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:padding="4dp">
+    <TextView android:id="@+id/tvText" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:background="@drawable/bg_bubble_other"
+        android:padding="8dp"/>
+    <ImageView android:id="@+id/ivMedia" android:layout_width="200dp"
+        android:layout_height="200dp" android:visibility="gone"/>
+    <TextView android:id="@+id/tvTime" android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:textSize="10sp"/>
+</LinearLayout>
+
+// ===== Filename: app/src/main/res/drawable/bg_study_pattern.xml =====
+<!-- आप यहाँ कोई pattern drawable या PNG refer कर सकते हैं -->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/study_background"
+    android:tileMode="repeat" />
+
+// ===== Filename: app/src/main/AndroidManifest.xml =====
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.example.smartaichat">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application
+        android:label="Smart Chat"
+        android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        <activity android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+
+// ===== Filename: app/build.gradle =====
+plugins {
+    id 'com.android.application'
+    id 'com.google.gms.google-services'
+}
+android {
+    compileSdk 33
+    defaultConfig {
+        applicationId "com.example.smartaichat"
+        minSdk 21
+        targetSdk 33
+    }
+}
+dependencies {
+    implementation 'com.google.firebase:firebase-database:20.1.0'
+    implementation 'com.google.firebase:firebase-auth:22.0.0'
+    implementation 'com.google.firebase:firebase-storage:20.1.0'
+    implementation 'com.github.vanniktech:emoji-google:0.7.0'
+    implementation 'com.github.bumptech.glide:glide:4.12.0'
+    implementation 'androidx.recyclerview:recyclerview:1.2.1'
+}
